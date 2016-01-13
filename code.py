@@ -1,7 +1,6 @@
 # coding: utf-8
 # script pion.py hjyf
 from Tkinter import *
-import numpy
 import numpy as np
 from gurobipy import *
 import timeit
@@ -10,81 +9,109 @@ import timeit
 ############ FONCTIONS ############# 
 ####################################
 gamma = 0.9
-actions = [ ('T',(-2, -1)), ('R',(-1, -2)), ('F',(1, -2)), ('G',(2, -1)), ('H',(2, 1)), ('J',(1, 2)), ('U',(-1,2)), ('Y',(-2, 1)) ]
+actions = {'t':(-2, -1), 'r':(-1, -2), 'f':(1, -2), 'g':(2, -1), 'h':(2, 1), 'j':(1, 2), 'u':(-1,2), 'y':(-2, 1)}
+actionsNames = ['t','r','f','g','h','j','u','y']
+reversed_action = {'t':'h', 'r':'j', 'f':'u', 'g':'y', 'h':'t', 'j':'r', 'u':'f', 'y':'g'}
 
 def case_possible(case):
-    if not 0 <= case[0] < nblignes or not 0 <= case[1] < nbcolonnes or g[case] == -1:
-        return False
-    return True
-
-def get_possible_destinations(case):
-    cases = [ tuple(map(sum, zip(case, action[1]))) for action in actions]
-    return [ c for c in cases if case_possible(c)]
-
-def get_possible_adjacents(case):
     i,j = case
-    return [ (i+x,j+y) for x in [-1,0,1] for y in [-1,0,1] if not(x==0 and y==0) and case_possible((i+x,j+y)) and (g[i+x][j+y]!=-1)]
+    return i>= 0 and i<g.shape[0] and j>=0 and j<g.shape[1] and g[i,j] != -1
+
+def get_possible_actions(case):
+    return np.array([ action for action, move in actions.items() if case_possible( tuple(map(sum,zip(case,move))))])
+
+def get_possible_adjacents(case,dist=1):
+    var = np.arange(-dist,dist+1)
+    i,j = case
+    return np.array( [ (i+x,j+y) for x in var for y in var if not(x==0 and y==0) and case_possible((i+x,j+y)) and (g[i+x][j+y]!=-1)])
+
+def get_possible_dests(case,action):
+    dest = map(sum,zip(case,actions[action]))
+    adj_dest = get_possible_adjacents(dest)
+    return np.array([ [np.array(dest),1.-(len(adj_dest)/16.)]] + [ [adj,1./16.] for adj in adj_dest])
 
 def pl(g,OutputFlag=False):
 
-    #Grille de recompenses
-    r = np.zeros(g.shape)
-    for i, gi in enumerate(g):
-        for j, gij in enumerate(gi):
-            if gij == 0:    r[i][j] = -2
-            elif gij == -1: r[i][j] = None
-            elif gij ==  2: r[i][j] = -1
-            elif gij ==  3: r[i][j] = -1
-    r[-1][-1] = 998
+    #Grille de recompenses bleu
+    Rb = np.where(g==2,-1,-2)
+    Rb[-1,-1] = 998
+    #Grille de recompenses rouge
+    Rr = np.where(g==3,-1,-2)
+    Rr[-1,-1] = 998
 
     # Creation d'un nouveau model
-    model = Model("mogplex")
+    model = Model("dual")
     model.setParam( 'OutputFlag', OutputFlag )
 
     # Declaration variables de decision
-    #z = model.addVar(vtype=GRB.CONTINUOUS, lb=0, name="z")
-    v = np.array( [ [ None if c == -1 else model.addVar(vtype=GRB.CONTINUOUS, lb=0, name="v"+str(i)+"_"+str(j)) for j,c in enumerate(ligne) ] for i,ligne in enumerate(g) ] )
-    model.update() # maj du modele pour integrer les nouvelles variables
+    Z = model.addVar(vtype=GRB.CONTINUOUS, lb=-10000000, name="Z")
+    X = np.array( [[ {} if case != -1 else None for case in ligne] for ligne in g] )
+    D = np.copy(X)
+    for x in range(g.shape[0]):
+        for y in range(g.shape[1]):
+            if g[x,y] != -1:
+                possible_actions = [] if x==g.shape[0]-1 and y==g.shape[1]-1 else get_possible_actions((x,y))
+                X[x,y] = dict( [ (action, model.addVar(vtype=GRB.CONTINUOUS, name="X(%d,%d)_%s"%(x,y,action))) for action in possible_actions ])
+                D[x,y] = dict( [ (action, model.addVar(vtype=GRB.BINARY, name="D(%d,%d)_%s"%(x,y,action))) for action in possible_actions ])
+    model.update()
+
+    nbL,nbC = X.shape
+    sspa = np.zeros((nbL,nbC,nbL,nbC,len(actions)))
+    for x in range(X.shape[0]):
+        for y in range(X.shape[1]):
+            if X[x,y] != None and not(np.array_equal([x,y],[X.shape[0]-1,X.shape[1]-1])):
+                for action in get_possible_actions((x,y)):
+                    for dest,proba in get_possible_dests((x,y),action):
+                        sspa[x,y][dest[0],dest[1]][actionsNames.index(action)] = proba
 
     # Definition de l'objectif
-    obj = quicksum([vij for vij in v.reshape(nblignes*nbcolonnes) if vij != None])
-    #obj.add(z, -1.0)
-    model.setObjective(obj,GRB.MINIMIZE)
+    model.setObjective(Z,GRB.MAXIMIZE)
+    model.update()
 
     # Definition des contraintes
-    #model.addConstr(z <= quicksum(v[np.where(g==2)]), "zB")
-    #model.addConstr(z <= quicksum(v[np.where(g==3)]), "zR")
-    for i,vi in enumerate(v):
-        for j,vij in enumerate(vi):
-            if i+1==v.shape[0] and j+1==v.shape[1]:
-                model.addConstr(vij == r[i][j],"goal")
-            elif vij != None:
-                dest = get_possible_destinations((i,j))
-                for a,(xd,yd) in enumerate(dest):
-                    expr = LinExpr(r[i][j])
-                    adj = get_possible_adjacents((xd,yd))
-                    for xa,ya in adj:
-                        expr.add(v[xa][ya],gamma/16.)
-                    expr.add(v[xd][yd],gamma*(1.-float(len(adj))/16.))
-                    model.addConstr(vij >= expr, "v"+str(i)+"_"+str(j)+"_")
+    contrainteBleue = LinExpr()
+    contrainteRouge = LinExpr()
+    for x in range(g.shape[0]):
+        for y in range(g.shape[1]):
+            if g[x,y] != -1 and X[x,y] != {}:
+                model.addConstr( quicksum(D[x,y].values()) <= 1,"P0(%d,%d)"%(x,y)) # contraintes pour forcer des politiques pures
+                som = LinExpr()
+                for action in X[x,y].keys():
+                    model.addConstr( (1 - gamma)*X[x,y][action] <= D[x,y][action],"P1(%d,%d)_%s"%(x,y,action)) # contraintes pour forcer des politiques pures
+                    dest = tuple(map(sum,zip((x,y),actions[action])))
+                    adj = get_possible_adjacents(dest)
+                    coefB = ( 1. - len(adj) / 16.) * Rb[dest] + (1./16.) * np.sum(Rb[adj[:,0],adj[:,1]])
+                    coefR = ( 1. - len(adj) / 16.) * Rr[dest] + (1./16.) * np.sum(Rr[adj[:,0],adj[:,1]])
+                    contrainteBleue.add(X[x,y][action],coefB)
+                    contrainteRouge.add(X[x,y][action],coefR)
+                    adj_xy = get_possible_adjacents((x,y))
+                    if dest != (g.shape[0]-1,g.shape[1]-1):
+                        for xp,array in enumerate(sspa[:,:,x,y,:]):
+                            for yp,ligne in enumerate(array):
+                                for a,proba in enumerate(ligne):
+                                    if proba != 0:
+                                        som.add(X[xp,yp][actionsNames[a]],proba)
+                model.addConstr( (quicksum(X[x,y].values()) -gamma * som) == 1.,"C(%d,%d)"%(x,y)) # contraintes
+    model.addConstr( Z <= contrainteBleue,'LB') # contrainte de linearisation bleue
+    model.addConstr( Z <= contrainteRouge,'LR') # contrainte de linearisation rouge
+    model.update()
 
     # Resolution
     tmpExec = 0
     t = timeit.default_timer()
     model.optimize()
+    model.write("out.lp")
     tmpExec = timeit.default_timer() - t
 
-    return np.array( [ [None if vij == None else vij.x for vij in l ]for l in v] )
+    politique = np.chararray(g.shape)
+    for x in range(g.shape[0]):
+        for y in range(g.shape[1]):
+            for action, d in D[x,y].items():
+                if d.x == 1:
+                    politique[x,y] = action
+                    break
 
-def get_politique(v):
-    politique = [['X' for j in range(nbcolonnes)]for i in range(nblignes)]
-    for i, vi in enumerate(v):
-        for j, vij in enumerate(vi):
-            if g[i][j] != -1:
-                cases = [ tuple(map(sum, zip((i,j), action[1]))) for action in actions]
-                scores = [ v[c] if case_possible(c) else None for c in cases ]
-                politique[i][j] = actions[np.argmax(scores)][0]
-    return np.array(politique)
+    return politique
 
 ####################################
 ##########  INTERFACE ############## 
@@ -102,12 +129,12 @@ def initialize():
     w.config(text='Cost = '+ str(globalcost))
 
 def colordraw(g,nblignes,nbcolonnes):
-    pmur=0.15 #0.15
-    pblanc=0.55 #0.55
-    pverte=0.1
-    pbleue=0.1
-    prouge=0.1
-    pnoire=0.1
+    pmur=0.1 #0.15
+    pblanc=0.5 #0.55
+    pverte=0
+    pbleue=0.2
+    prouge=0.2
+    pnoire=0
     for i in range(nblignes):
         for j in range(nbcolonnes):
             z=np.random.uniform(0,1)
@@ -143,9 +170,8 @@ def Clavier(event):
     changed=0
     # deplacement aleatoire en appuyant sur space
     if touche == 'space':
-        t=np.random.randint(6)
-        lettre = ['f','g','h','j','y','u',]
-        touche=lettre[t]
+        touche=p[li,cj]
+        changed=1
     # deplacement (-2,1)
     if touche == 'y' and li>1 and cj < nbcolonnes-1 and g[li-2,cj+1]>-1:
         PosY -= zoom*20*2
@@ -234,7 +260,7 @@ Mafenetre.title('MDP')
 
 zoom=2
 
-alea = 0 #transitions aleatoires si alea =1 sinon mettre alea=0
+alea = 1 #transitions aleatoires si alea =1 sinon mettre alea=0
 
 #taille de la grille
 nblignes=10
@@ -247,9 +273,9 @@ Largeur = zoom*20*nbcolonnes+40
 Hauteur = zoom*20*nblignes+40
  
 # valeurs de la grille
-g= np.zeros((nblignes,nbcolonnes), dtype=numpy.int)
-cost= np.zeros(5, dtype=numpy.int)
-weight= np.zeros(5, dtype=numpy.int)
+g= np.zeros((nblignes,nbcolonnes), dtype=np.int)
+cost= np.zeros(5, dtype=np.int)
+weight= np.zeros(5, dtype=np.int)
 weight[0] = 1
 weight[1] = 10
 weight[2] = 20
@@ -279,10 +305,10 @@ colordraw(g,nblignes,nbcolonnes)
 
 
 
-v = pl(g)
-p = get_politique(v)
-test = np.array( [[ None if cel == None else int(cel) for cel in ligne]for ligne in v] )
-print(test)
+
+
+p = pl(g)
+
 for i,lin in enumerate(g):
     for j,col in enumerate(lin):
         y = j*20*zoom+20
@@ -290,7 +316,7 @@ for i,lin in enumerate(g):
         if g[i][j] != -1:
             rec = Canevas.create_rectangle(y, x, y+zoom*20, x+zoom*20)
             Canevas.tag_lower(rec)
-            Canevas.create_text(y +10, x +10, text=p[i][j])
+            Canevas.create_text(y +10, x +10, text=p[i,j])
 
 
 
@@ -309,67 +335,9 @@ Button(Mafenetre, text ='Quit', command = Mafenetre.destroy).pack(side=LEFT,padx
 w = Label(Mafenetre, text='Cost = '+str(globalcost),fg=myblack,font = "Verdana 14 bold")
 w.pack() 
 
-Pion = Canevas.create_oval(PosX-10,PosY-10,PosX+10,PosY+10,width=1,outline='black')
+Pion = Canevas.create_oval(PosX-10,PosY-10,PosX+10,PosY+10,width=1,outline='black',fill='yellow')
+Canevas.lower(Pion)
 
 initialize()
 
 Mafenetre.mainloop()
-
-
-'''
-nblignes=10
-nbcolonnes=10
-
-g = np.zeros((nblignes,nbcolonnes), dtype=np.int)
-
-pmur=0.15
-pblanc=0.55
-pverte=0.1
-pbleue=0.1
-prouge=0.1
-pnoire=0.1
-for i in range(nblignes):
-    for j in range(nbcolonnes):
-        z=np.random.uniform(0,1)
-        if z < pmur: c=-1
-        elif z < pmur + pblanc: c=0
-        elif z < pmur + pblanc + pverte: c=1
-        elif z < pmur + pblanc + pverte + pbleue: c=2
-        elif z < pmur + pblanc + pverte + pbleue + prouge: c=3
-        else: c=4
-        g[i,j]=c
-g[0,0]=0
-g[0,1]=0
-g[2,0]=0
-g[nblignes-1,nbcolonnes-1]=0
-g[nblignes-2,nbcolonnes-1]=0
-g[nblignes-1,nbcolonnes-2]=0
-
-
-def cost(case):
-    case_type = g[case]
-
-    if case_type == 0:
-        return -1
-    elif case_type == 1:
-        return -11
-    elif case_type == 2:
-        return -21
-    elif case_type == 3:
-        return -31
-    return NULL
-
-vt = np.zeros((nblignes,nbcolonnes))
-vt[-1][-1]=1000
-vtplusun = 0
-i = 0
-while True:
-    i += 1
-    if i % 20 == 0: print(np.array(vt))
-    vtplusun = [[max([cost(dest)+gamma*vt[dest[0]][dest[1]] for dest in get_possible_destinations((i,j))]) for i in range(nblignes)] for j in range(nbcolonnes)]
-    if np.array_equal(vt, vtplusun):
-        break
-    vt=vtplusun
-
-v2 = [[max([cost(dest) for dest in get_possible_destinations((i,j))]) for i in range(nblignes)] for j in range(nbcolonnes)]
-'''
