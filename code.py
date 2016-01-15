@@ -44,7 +44,7 @@ def pl(g,OutputFlag=False):
     model.setParam( 'OutputFlag', OutputFlag )
 
     # Declaration variables de decision
-    Z = model.addVar(vtype=GRB.CONTINUOUS, lb=-10000000, name="Z")
+    Z = model.addVar(vtype=GRB.CONTINUOUS, lb=-99999999, name="Z")
     X = np.array( [[ {} if case != -1 else None for case in ligne] for ligne in g] )
     D = np.copy(X)
     for x in range(g.shape[0]):
@@ -54,7 +54,7 @@ def pl(g,OutputFlag=False):
                 X[x,y] = dict( [ (action, model.addVar(vtype=GRB.CONTINUOUS, name="X(%d,%d)_%s"%(x,y,action))) for action in possible_actions ])
                 D[x,y] = dict( [ (action, model.addVar(vtype=GRB.BINARY, name="D(%d,%d)_%s"%(x,y,action))) for action in possible_actions ])
     model.update()
-
+    
     nbL,nbC = X.shape
     sspa = np.zeros((nbL,nbC,nbL,nbC,len(actions)))
     for x in range(X.shape[0]):
@@ -73,6 +73,9 @@ def pl(g,OutputFlag=False):
     contrainteRouge = LinExpr()
     for x in range(g.shape[0]):
         for y in range(g.shape[1]):
+            if x==g.shape[0]-1 and y==g.shape[1]-1:
+                    contrainteBleue.add(Rb[x,y])
+                    contrainteRouge.add(Rr[x,y])
             if g[x,y] != -1 and X[x,y] != {}:
                 model.addConstr( quicksum(D[x,y].values()) <= 1,"P0(%d,%d)"%(x,y)) # contraintes pour forcer des politiques pures
                 som = LinExpr()
@@ -85,13 +88,12 @@ def pl(g,OutputFlag=False):
                     contrainteBleue.add(X[x,y][action],coefB)
                     contrainteRouge.add(X[x,y][action],coefR)
                     adj_xy = get_possible_adjacents((x,y))
-                    if dest != (g.shape[0]-1,g.shape[1]-1):
-                        for xp,array in enumerate(sspa[:,:,x,y,:]):
-                            for yp,ligne in enumerate(array):
-                                for a,proba in enumerate(ligne):
-                                    if proba != 0:
-                                        som.add(X[xp,yp][actionsNames[a]],proba)
-                model.addConstr( (quicksum(X[x,y].values()) -gamma * som) == 1.,"C(%d,%d)"%(x,y)) # contraintes
+                for xp,array in enumerate(sspa[:,:,x,y,:]):
+                    for yp,ligne in enumerate(array):
+                        for a,proba in enumerate(ligne):
+                            if proba != 0:
+                                som.add(X[xp,yp][actionsNames[a]],proba)
+                model.addConstr( (quicksum(X[x,y].values()) -gamma * som) <= 0.5,"C(%d,%d)"%(x,y)) # contraintes
     model.addConstr( Z <= contrainteBleue,'LB') # contrainte de linearisation bleue
     model.addConstr( Z <= contrainteRouge,'LR') # contrainte de linearisation rouge
     model.update()
@@ -106,11 +108,13 @@ def pl(g,OutputFlag=False):
     politique = np.chararray(g.shape)
     for x in range(g.shape[0]):
         for y in range(g.shape[1]):
-            for action, d in D[x,y].items():
-                if d.x == 1:
-                    politique[x,y] = action
-                    break
-
+            if D[x,y] != None and g[x,y] != -1:
+                for action, d in D[x,y].items():
+                    if d.x == 1:
+                        politique[x,y] = action
+                        break
+            else:
+                politique[x,y] = None
     return politique
 
 ####################################
@@ -129,11 +133,11 @@ def initialize():
     w.config(text='Cost = '+ str(globalcost))
 
 def colordraw(g,nblignes,nbcolonnes):
-    pmur=0.1 #0.15
-    pblanc=0.5 #0.55
+    pmur=0.1 #0.1
+    pblanc=0.5 #0.5
     pverte=0
-    pbleue=0.2
-    prouge=0.2
+    pbleue=0.2 #0.2
+    prouge=0.2 #0.2
     pnoire=0
     for i in range(nblignes):
         for j in range(nbcolonnes):
@@ -243,7 +247,7 @@ def Clavier(event):
             NewPosX = PosX+zoom*20*dcj        
             newcj=(NewPosX-30)/(20*zoom)
             newli=(NewPosY-30)/(20*zoom)
-            print('d',dli,dcj)
+            #print('d',dli,dcj)
             if newli>=0 and newcj>=0 and newli<=nblignes-1 and newcj<=nbcolonnes-1 and g[newli,newcj]>-1:
                 PosY=NewPosY
                 PosX=NewPosX            
@@ -308,6 +312,7 @@ colordraw(g,nblignes,nbcolonnes)
 
 
 p = pl(g)
+print(p)
 
 for i,lin in enumerate(g):
     for j,col in enumerate(lin):
